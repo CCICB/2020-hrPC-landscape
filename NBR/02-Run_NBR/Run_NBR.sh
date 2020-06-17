@@ -1,0 +1,1 @@
+Rscript find_noncoding_drivers_precomp_correctoverlaps_EEWmod_noindels.R Landscape_somatic_variants.mut_burden_mb.filter10.without_indels.contigrm.txt gc19_pc.promCore_transcripts.sorted.merged2.sorted.GRCh37_alldifficultregions.tier3_subtract_bed12.bed
