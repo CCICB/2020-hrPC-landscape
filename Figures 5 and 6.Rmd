@@ -1,0 +1,611 @@
+---
+title: "MTB summary"
+output: html_notebook
+---
+```{r setup}
+library(tidyverse)
+library(mjcbase)
+library(ggsci)
+library(openxlsx)
+NPG_BLUE <- "#4EBBD6"
+NPG_RED <- "#E54C35"
+
+na.replace <- function(x, val) {
+  idx <- which(is.na(x))
+  if(length(idx)>0) {
+    x[idx] <- val
+  }
+  return(x)
+}
+
+```
+
+```{r}
+drug2pathway <- openxlsx::read.xlsx(f, sheet=6)[,1:3]
+drug2pathway <- drug2pathway[order(drug2pathway$DrugPathwayOrder, drug2pathway$DrugClass), ]
+drug2pathway$DrugClass <- factor(drug2pathway$DrugClass, levels=drug2pathway$DrugClass)
+```
+
+```{r functions}
+add_cancer_category <- function(x) {
+  # Paper categories are: CNS, HM, NBL, Sarcoma, Solid tumour
+  #as.matrix(unique(master.mono$Cancer.Type))
+  x$cancer_category <- NA
+  x$cancer_category[x$Cancer.Type == "Sarcoma"      ] <- "Sarcoma"
+  x$cancer_category[x$Cancer.Type == "DMG"          ] <- "CNS"
+  x$cancer_category[x$Cancer.Type == "EPD"          ] <- "CNS"
+  x$cancer_category[x$Cancer.Type == "NBL"          ] <- "NBL"
+  x$cancer_category[x$Cancer.Type == "Lymphoma"     ] <- "HM"
+  x$cancer_category[x$Cancer.Type == "MB"           ] <- "ST"
+  x$cancer_category[x$Cancer.Type == "CNS embryonal"] <- "CNS"
+  x$cancer_category[x$Cancer.Type == "Leukaemia"    ] <- "HM"
+  x$cancer_category[x$Cancer.Type == "HGG"          ] <- "CNS"
+  x$cancer_category[x$Cancer.Type == "CNS other"    ] <- "CNS"
+  x$cancer_category[x$Cancer.Type == "HM other"     ] <- "HM"
+  x$cancer_category[x$Cancer.Type == "Other"        ] <- "ST" # all are 'Solid other' or 'WT'
+  x$cancer_category[x$Cancer.Type == "Rhabdoid"     ] <- "ST"
+  x$cancer_category[x$Cancer.Type == "Glioma other" ] <- "CNS"
+  if(any(is.na(x$cancer_category))) {
+    print.venn(x$Cancer.Type, x$cancer_category)
+    unexpected_cats <- setdiff(x$Cancer.Type, na.rm(x$cancer_category))
+    msg <- sprintf("Found these unexpected cancer types: %s", paste(unexpected_cats, collapse=", "))
+    stop(msg)
+  }
+  return(x)
+}
+
+consolidate_pathways <- function(x) {
+  #sort(table(x$Pathway))
+  #sort(table(x$Single.agent.Rec.PW.for.paper))
+  x$DrugClass <- NA
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "Epigenetics (histone)"        ] <- "Epigenetic"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "FGFR"                         ] <- "RTK"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "JAK/STAT"                     ] <- "JAK-STAT"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "DNA damage repair"            ] <- "Other"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "DNA mismatch repair"          ] <- "Other"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "ERBB"                         ] <- "RTK"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "VEGFR"                        ] <- "RTK"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "Other pathway"                ] <- "Other"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "Other RTK"                    ] <- "RTK"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "Cell cycle"                   ] <- "Cell cycle"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "PI3K/AKT/mTOR"                ] <- "PI3K-AKT-mTOR"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "Epigenetics (SWI/SNF or PRC2)"] <- "Epigenetic"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "MAPK"                         ] <- "MAPK"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "Epigenetics (other)"          ] <- "Epigenetic"
+  x$DrugClass[x$Single.agent.Rec.PW.for.paper == "Apoptotic"                    ] <- "Apoptotic"
+  if(any(is.na(x$DrugClass))) {
+    unexpected_cats <- setdiff(x$Single.agent.Rec.PW.for.paper, na.rm(x$DrugClass))
+    msg <- sprintf("Found these unexpected drug pathways: %s", paste(unexpected_cats, sep=", "))
+    stop(msg)
+  }
+  return(x)
+}
+```
+
+```{r import_clean}
+f <- "Data for MTB recommendations landscape paper 20200615.xlsx" # 3 small changes
+master.mono <- openxlsx::read.xlsx(f, sheet=2)
+master.mono <- master.mono[!is.na(master.mono$PRISM.ID),]
+nrow(master.mono) # 190
+master.mono <- master.mono[is.na(master.mono$Recommendation.same),]
+nrow(master.mono) # 162
+sort(unique(master.mono$Single.agent.Rec.PW.for.paper))
+master.mono <- add_cancer_category(master.mono)
+master.mono <- consolidate_pathways(master.mono)
+#table(master.mono$DrugClass)
+
+write.delim(master.mono, "tmp-MonoTherapy.tsv")
+```
+
+```{r drug_classes}
+sort(table(master.mono$Drug.class.for.paper))
+master.mono$MonoTherapy <- master.mono$Drug.class.for.paper
+```
+
+Summarise the number of recommendations in each group
+```{r}
+a <- master.mono %>% drop_na(DrugClass) %>% group_by(DrugClass) %>% tally(name="DrugClassN")
+b <- master.mono %>% drop_na(DrugClass) %>% group_by(DrugClass, MonoTherapy) %>% tally(name="n")
+MonoTherapyCounts <- as.data.frame(
+  left_join(a,b,by="DrugClass") %>% 
+  arrange(desc(DrugClassN), DrugClass, desc(n), MonoTherapy)
+)
+# reorder
+MonoTherapyCounts <- rbind(
+  MonoTherapyCounts[MonoTherapyCounts$DrugClass != "Other", ],
+  MonoTherapyCounts[MonoTherapyCounts$DrugClass == "Other", ]
+)
+
+MonoTherapyCounts$DrugClass <- fct_inorder(MonoTherapyCounts$DrugClass)
+MonoTherapyCounts$MonoTherapy <- fct_inorder(MonoTherapyCounts$MonoTherapy)
+MonoTherapyCounts
+write.delim(MonoTherapyCounts, "tmp-MonoTherapyCounts.tsv")
+rm(a,b)
+```
+
+## DrugClass recommendations detailed - grouped by category
+```{r}
+gg.MonoTherapyCounts <- ggplot(MonoTherapyCounts, aes(x=MonoTherapy, y=n, ordered=TRUE)) + 
+  geom_bar(stat="identity", fill=NPG_BLUE, color="#FFFFFF") +
+  facet_grid(
+    ~DrugClass, scales="free_x", space = "free_x", labeller = label_wrap_gen(width=12)
+  ) +
+  labs(x = "Therapies", y = "Recommendation freq") + 
+  scale_y_continuous(expand = c(0,1)) + 
+  theme_bw() +
+  theme(
+    axis.text=element_text(size=14),
+    axis.title=element_text(size=14),
+    axis.text.x = element_text(vjust=0.5, hjust=1.0, angle=90),
+    axis.title.x=element_blank(),
+    axis.title.y = element_text(angle = 90, vjust = 0.5),
+    strip.text.x = element_text(size=12),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines")
+  )
+gg.MonoTherapyCounts
+ggsave("FigMTB-MonoTherapyCounts-detailed.pdf", width=400, height=210, units="mm")
+ggsave("FigMTB-MonoTherapyCounts-detailed.png", width=400, height=210, units="mm")
+```
+
+```{r import_combo}
+master.combo <- openxlsx::read.xlsx(f, sheet=3)
+master.combo <- master.combo[!is.na(master.combo$PRISM.ID),]
+nrow(master.combo) # 82
+master.combo <- master.combo[is.na(master.combo$Recommendation.same),]
+nrow(master.combo) # 73
+master.combo <- add_cancer_category(master.combo)
+#View(master.combo)
+
+write.delim(master.combo, "tmp-ComboTherapy.tsv")
+```
+
+# Mono and Combo barplot
+* summarise the frequency of recommendations
+```{r}
+a <- as.data.frame.table(table(master.mono$MonoTherapy), responseName="n", row.names=NULL, stringsAsFactors = FALSE)
+b <- as.data.frame.table(table(master.combo$ComboDrug1), responseName="n", row.names=NULL, stringsAsFactors = FALSE)
+c <- as.data.frame.table(table(master.combo$ComboDrug2), responseName="n", row.names=NULL, stringsAsFactors = FALSE)
+drugSummaries <- merge(a,merge(b,c,by="Var1", all=T),by="Var1", all=T)
+sum(drugSummaries[,2:4], na.rm=T) # 308
+drugSummaries$Therapy <- drugSummaries$Var1
+drugSummaries$MonoTherapy <- na.replace(drugSummaries$n, 0)
+drugSummaries$ComboTherapy <- na.replace(drugSummaries$n.x, 0) + na.replace(drugSummaries$n.y,0)
+drugSummaries$DrugClass <- drug2pathway$DrugPathway[match(drugSummaries$Therapy, drug2pathway$DrugClass)]
+
+drugSummaries <- drugSummaries[,c("DrugClass", "Therapy", "MonoTherapy", "ComboTherapy")]
+drugSummaries$Total <- rowSums(drugSummaries[,c("MonoTherapy", "ComboTherapy")])
+drugSummaries$Percent <- drugSummaries$Total/sum(drugSummaries$Total)*100
+drugSummaries <- drugSummaries[order(drugSummaries$Total, decreasing=TRUE), ]
+View(drugSummaries)
+write.delim(drugSummaries, "tmp-DrugSummaries.tsv")
+```
+
+* import the excel sheet
+```{r}
+# sort and fix (via factorising) the data by DrugClass, then drug, with 'Other' on the far right.
+MonoComboTherapyCounts <- drugSummaries %>% select(-c(Percent, Total)) %>% gather("MonoTherapy", "ComboTherapy", key="TherapyRecommentationType", value=n)
+a <- MonoComboTherapyCounts %>% group_by(DrugClass) %>% summarise(DrugClassN=sum(n)) 
+b <- MonoComboTherapyCounts %>% group_by(DrugClass,Therapy) %>% summarise(TherapyN=sum(n)) 
+ab <- left_join(a, b, by="DrugClass")
+d <- MonoComboTherapyCounts %>% select(-one_of("DrugClass")) %>% arrange(Therapy, TherapyRecommentationType)
+MonoComboTherapyCounts <- as.data.frame(
+  left_join(ab, d, by="Therapy") %>%
+    arrange(desc(DrugClassN), DrugClass, desc(TherapyN), Therapy, TherapyRecommentationType)
+)
+MonoComboTherapyCounts <- rbind(
+  MonoComboTherapyCounts[MonoComboTherapyCounts$DrugClass != "Other", ],
+  MonoComboTherapyCounts[MonoComboTherapyCounts$DrugClass == "Other", ]
+)
+MonoComboTherapyCounts$DrugClass <- fct_inorder(MonoComboTherapyCounts$DrugClass)
+MonoComboTherapyCounts$Therapy <- fct_inorder(MonoComboTherapyCounts$Therapy)
+MonoComboTherapyCounts$TherapyRecommentationType <- fct_infreq(MonoComboTherapyCounts$TherapyRecommentationType)
+
+MonoComboTherapyCounts$DrugClass <- as.character(MonoComboTherapyCounts$DrugClass)
+MonoComboTherapyCounts$DrugClass[MonoComboTherapyCounts$DrugClass == "Immune"] <- "IMT"
+MonoComboTherapyCounts$DrugClass <- fct_inorder(MonoComboTherapyCounts$DrugClass)
+levels(MonoComboTherapyCounts$TherapyRecommentationType) <- sub("Therapy", "", levels(MonoComboTherapyCounts$TherapyRecommentationType))
+levels(MonoComboTherapyCounts$TherapyRecommentationType) <- sub("Combo", "Combination", levels(MonoComboTherapyCounts$TherapyRecommentationType))
+levels(MonoComboTherapyCounts$TherapyRecommentationType) <- sub("Mono", "Single-agent", levels(MonoComboTherapyCounts$TherapyRecommentationType))
+
+View(MonoComboTherapyCounts)
+write.delim(MonoComboTherapyCounts, "tmp-MonoComboTherapyCounts.tsv")
+rm(a,b,ab,d)
+```
+
+```{r}
+ggMonoComboTherapyCounts <- ggplot(MonoComboTherapyCounts, aes(x=Therapy, y=n, ordered=TRUE, fill=TherapyRecommentationType)) + 
+  geom_bar(stat="identity") +
+  facet_grid(
+    ~DrugClass, scales="free_x", space = "free_x", labeller = label_wrap_gen(width=12)
+  ) +
+  labs(x = "", y = "Recommendation frequency") + 
+  scale_y_continuous(expand = c(0,1)) + 
+  scale_fill_npg() + 
+  theme_bw() +
+  theme(
+    legend.title=element_blank(),
+    legend.position = c(0.9, 0.8), 
+    legend.justification = c(0, 0),
+    legend.direction = "vertical",
+    legend.box.margin=margin(c(0,0,0,0)),
+    legend.text=element_text(size=10),
+    axis.text=element_text(size=10),
+    axis.title=element_text(size=10),
+    axis.text.x = element_text(vjust=0.5, hjust=1.0, angle=90),
+    axis.title.x = element_text(size=10),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=6),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines")
+  ) + ylab("n") + xlab("therapy recommendation")
+ggMonoComboTherapyCounts
+ggsave("FigMTB-MonoAndComboTherapyCounts-detailed.pdf", width=400, height=143, units="mm")
+ggsave("FigMTB-MonoAndComboTherapyCounts-detailed.png", width=400, height=143, units="mm")
+```
+
+* remove chemo and HCQ from this analysis
+```{r}
+MonoComboTherapyCountsNoChemo <- MonoComboTherapyCounts %>% filter(! Therapy %in% c("Chemotherapy", "HCQ"))
+ggMonoComboTherapyCountsNoChemo <- ggplot(MonoComboTherapyCountsNoChemo, aes(x=Therapy, y=n, ordered=TRUE, fill=TherapyRecommentationType)) + 
+  geom_bar(stat="identity") +
+  facet_grid(
+    ~DrugClass, scales="free_x", space = "free_x", labeller = label_wrap_gen(width=12)
+  ) +
+  labs(x = "", y = "Recommendation frequency") + 
+  scale_y_continuous(expand = c(0,1)) + 
+  scale_fill_npg() + 
+  theme_bw() +
+  theme(
+    legend.title=element_blank(),
+    legend.position = c(0.9, 0.8), 
+    legend.justification = c(0, 0),
+    legend.direction = "vertical",
+    legend.box.margin=margin(c(0,0,0,0)),
+    legend.text=element_text(size=10),
+    axis.text=element_text(size=10),
+    axis.title=element_text(size=10),
+    axis.text.x = element_text(vjust=0.5, hjust=1.0, angle=90),
+    axis.title.x = element_text(size=10),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=6),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines")
+  ) + ylab("n") + xlab("therapy recommendation")
+ggMonoComboTherapyCountsNoChemo
+ggsave("FigMTB-MonoComboTherapyCountsNoChemo-detailed.pdf", width=400, height=143, units="mm")
+ggsave("FigMTB-MonoComboTherapyCountsNoChemo-detailed.png", width=400, height=143, units="mm")
+```
+
+
+# Plot an adjacency matrix of combo therapies
+```{r}
+plot_data <- count(master.combo[,c("ComboDrug1", "ComboDrug2")], ComboDrug1, ComboDrug2)
+plot_data$n2 <- factor(ifelse(plot_data$n > 5, ">5", plot_data$n), levels=c("1","2","3","4","5", ">5"))
+plot_data$ComboDrug1 <- factor(plot_data$ComboDrug1, levels = levels(drug2pathway$DrugClass))
+plot_data$ComboDrug2 <- factor(plot_data$ComboDrug2, levels = levels(drug2pathway$DrugClass))
+write.delim(plot_data, "tmp-ComboCounts.tsv")
+plot_data
+# Create the adjacency matrix plot
+ggComboDrugHeatmap <- ggplot(plot_data, aes(x = ComboDrug2, y = ComboDrug1)) +
+      geom_tile(aes(fill=n2)) +
+      scale_fill_brewer(palette="Reds") +
+      theme_bw() +
+      scale_x_discrete() +
+      scale_y_discrete() +
+      theme(
+        axis.text.x = element_text(angle = 90, hjust=1, vjust = 0.5),
+        aspect.ratio = 1,
+        legend.position = "right",
+        legend.title = element_blank()
+      ) + xlab("") + ylab("")
+ggComboDrugHeatmap
+ggsave("FigMTB-ComboTherapyCounts-square.pdf", width=210, height=210, units="mm")
+ggsave("FigMTB-ComboTherapyCounts-square.png", width=210, height=210, units="mm")
+
+```
+
+# Tier of recommendation
+```{r}
+tiers <- rbind(
+  table(master.mono$Tier.of.recommendation),
+  table(master.combo$Tier.of.recommendation)
+)
+
+tiers <- data.frame(RecType=c("mono", "combo"), tiers, check.names = FALSE)
+tiers
+x <- tiers  %>%
+  gather("1M", "2M", "3M", "4M", "5M", key = Tier, value = n)
+x$Tier <- sub("M", "", x$Tier)
+x
+write.delim(x, "tmp-tierSummary.tsv")
+ggTiers <- ggplot(x, aes(x=Tier, y=n)) + 
+  geom_bar(aes(fill=RecType), stat="identity") + 
+  theme_bw() +
+  scale_fill_npg() + 
+  scale_y_continuous(limits = c(0,80), expand = c(0, 0)) +
+  theme(
+    axis.text.x = element_text(vjust=0.5, hjust=0.5, angle=0),
+    axis.title.x = element_text(size=10),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines"),
+    legend.position = "none"
+  )  + xlab("Recommendation tier") + ylab("n")
+ggTiers
+ggsave("FigMTB-TierSummary.pdf", width=120, height=120, units="mm")
+ggsave("FigMTB-TierSummary.png", width=120, height=120, units="mm")
+```
+
+# Recommendation type summary
+```{r}
+recTypeSum <- rbind(
+  Single=nrow(master.mono),
+  as.matrix(table(sub(" .*", "", master.combo$Combination.type)))
+)
+recTypeSum <- as_tibble(recTypeSum, rownames="RecType", .name_repair="minimal")
+names(recTypeSum)[2] <- "n"
+recTypeSum
+write.delim(recTypeSum, "tmp-recTypeSummary.tsv")
+
+ggRecSummary <- ggplot(recTypeSum, aes(x=RecType, y=n)) + 
+  geom_bar(stat="identity", fill=c(NPG_BLUE, NPG_RED, NPG_RED), color=c(NPG_BLUE, NPG_RED, NPG_RED)) +
+  theme_bw() +
+  scale_colour_npg() + 
+  scale_y_continuous(limits = c(0,175), expand = c(0, 0)) +
+  theme(
+    axis.text.x = element_text(vjust=0.5, hjust=0.5, angle=0),
+    axis.title.x = element_text(size=10),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines"),
+    legend.position = "none"
+  ) + xlab("Type of recommendation")
+ggRecSummary
+ggsave("FigMTB-RecSummary.pdf", width=120, height=120, units="mm")
+ggsave("FigMTB-RecSummary.png", width=120, height=120, units="mm")
+
+```
+
+# Number of recommendations per patient summary - split by mono/combo
+* This has a max of 4 & does not accoiunt for a pt with 4 monotherapies and 1 combo therapy rec.
+
+```{r}
+a <- as.data.frame(table(table(master.mono$PRISM.ID)));  colnames(a) <- c("NumRecs", "Mono")
+b <- as.data.frame(table(table(master.combo$PRISM.ID))); colnames(b) <- c("NumRecs", "Combo")
+numRecSumByType0 <- as_tibble(merge(a,b, all=T))
+numRecSumByType0 <- numRecSumByType0 %>% gather("Mono", "Combo", key = RecType, value = n) %>% mutate(n = replace_na(n, 0))
+numRecSumByType0
+all_patients <- unique(na.rm(openxlsx::read.xlsx(f, sheet=1)$PRISM.ID))
+length(all_patients) ## 201.
+numRecSumByType0
+write.delim(numRecSumByType0, "tmp-numRecSummaryByType.tsv")
+
+ggNumRecsByType <- ggplot(numRecSumByType0, aes(x=NumRecs, y=n)) + 
+  geom_bar(aes(fill=RecType), stat="identity") + 
+  theme_bw() +
+  scale_fill_npg() + 
+  scale_y_continuous(limits = c(0,120), expand = c(0, 0)) +
+  theme(
+    axis.text.x = element_text(vjust=0.5, hjust=0.5, angle=0),
+    axis.title.x = element_text(angle = 0, hjust = 0.5),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines"),
+    legend.position = "none"
+  ) + xlab("Number of recommendations") + ylab("n")
+ggNumRecsByType
+ggsave("FigMTB-NumRecSummaryByType.pdf", width=120, height=120, units="mm")
+ggsave("FigMTB-NumRecSummaryByType.png", width=120, height=120, units="mm")
+```
+
+
+```{r}
+a <- as.data.frame(table(table(master.mono$PRISM.ID)));  colnames(a) <- c("NumRecs", "Mono")
+a$NumRecs <- as.character(a$NumRecs)
+b <- as.data.frame(table(table(master.combo$PRISM.ID))); colnames(b) <- c("NumRecs", "Combo")
+b$NumRecs <- as.character(b$NumRecs)
+numRecSumByType0 <- as_tibble(merge(a,b, all=T))
+numRecSumByType0 <- numRecSumByType0 %>% gather("Mono", "Combo", key = RecType, value = n) %>% mutate(n = replace_na(n, 0))
+numRecSumByType0
+all_patients <- unique(na.rm(openxlsx::read.xlsx(f, sheet=1)$PRISM.ID))
+length(all_patients) ## 201.
+patients_no_recs <- setdiff(all_patients, c(master.mono$PRISM.ID, master.combo$PRISM.ID))
+numRecSumByType0 <- numRecSumByType0 %>% add_row(NumRecs="0", RecType=".None", n=length(patients_no_recs))
+#numRecSumByType0 <- numRecSumByType0 %>% add_row(NumRecs="0", RecType="Combo", n=0)
+numRecSumByType0 <- numRecSumByType0 %>% arrange(NumRecs, RecType, n)
+numRecSumByType0
+write.delim(numRecSumByType0, "tmp-numRecSummaryByType.tsv")
+
+ggNumRecsByType <- ggplot(numRecSumByType0, aes(x=NumRecs, y=n)) + 
+  geom_bar(aes(fill=RecType), fill=c("lightgrey", rep(c(NPG_RED, NPG_BLUE), 4)), stat="identity") + 
+  theme_bw() +
+  #scale_fill_npg() + 
+  scale_y_continuous(limits = c(0,120), expand = c(0, 0)) +
+  theme(
+    axis.text.x = element_text(vjust=0.5, hjust=0.5, angle=0),
+    axis.title.x = element_text(angle = 0, hjust = 0.5),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines"),
+    legend.position = "none"
+  ) + xlab("Number of recommendations") + ylab("n")
+ggNumRecsByType
+ggsave("FigMTB-NumRecSummaryByTypeWithZeros.pdf", width=120, height=120, units="mm")
+ggsave("FigMTB-NumRecSummaryByTypeWithZeros.png", width=120, height=120, units="mm")
+```
+
+```{r}
+a <- c(master.mono$PRISM.ID, master.combo$PRISM.ID)
+numRecSum <- as.data.frame(table(table(a))); colnames(numRecSum) <- c("NumRecs", "n")
+numRecSum
+write.delim(numRecSum, "tmp-numRecSummary.tsv")
+
+ggNumRecs <- ggplot(numRecSum, aes(x=NumRecs, y=n)) + 
+  geom_bar(fill="lightgrey", colour="lightgrey", stat="identity") + 
+  theme_bw() +
+  scale_y_continuous(limits = c(0,75), expand = c(0, 0)) +
+  theme(
+    axis.text.x = element_text(vjust=0.5, hjust=0.5, angle=0),
+    axis.title.x = element_text(angle = 0, hjust = 0.5),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines"),
+    legend.position = "none"
+  ) + xlab("Number of recommendations") + ylab("n")
+ggNumRecs
+ggsave("FigMTB-NumRecSummary.pdf", width=120, height=120, units="mm")
+ggsave("FigMTB-NumRecSummary.png", width=120, height=120, units="mm")
+```
+
+
+* With Zeros...
+```{r}
+
+all_patients <- unique(na.rm(openxlsx::read.xlsx(f, sheet=1)$PRISM.ID))
+length(all_patients) ## 201.
+patients_no_recs <- setdiff(all_patients, c(master.mono$PRISM.ID, master.combo$PRISM.ID))
+length(patients_no_recs) # 67
+
+a <- c(master.mono$PRISM.ID, master.combo$PRISM.ID)
+numRecSum0 <- as.data.frame(table(table(a))); colnames(numRecSum0) <- c("NumRecs", "n")
+numRecSum0$NumRecs <- as.character(numRecSum0$NumRecs)
+numRecSum0 <- numRecSum0 %>% add_row(NumRecs="0", n=length(patients_no_recs))
+numRecSum0 <- numRecSum0 %>% arrange(NumRecs)
+numRecSum0
+write.delim(numRecSum0, "tmp-numRecSummaryZeros.tsv")
+
+ggNumRecs0 <- ggplot(numRecSum0, aes(x=NumRecs, y=n)) + 
+  geom_bar(fill="lightgrey", colour="lightgrey", stat="identity") + 
+  theme_bw() +
+  scale_y_continuous(limits = c(0,75), expand = c(0, 0)) +
+  theme(
+    axis.text.x = element_text(vjust=0.5, hjust=0.5, angle=0),
+    axis.title.x = element_text(angle = 0, hjust = 0.5),
+    axis.title.y = element_text(angle = 0, vjust = 0.5),
+    strip.text.x = element_text(size=10),
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.x = element_blank(),
+    plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+    panel.spacing = unit(0, "lines"),
+    legend.position = "none"
+  ) + xlab("Number of recommendations") + ylab("n")
+ggNumRecs0
+ggsave("FigMTB-NumRecSummaryWithZeros.pdf", width=120, height=120, units="mm")
+ggsave("FigMTB-NumRecSummaryWithZeros.png", width=120, height=120, units="mm")
+```
+
+# Multipanel figure
+```{r}
+library(ggpubr)
+xTop <- ggarrange(ggNumRecs0, ggTiers, ggRecSummary, nrow=1, 
+                  labels=LETTERS[1:3], legend=NULL, align="hv")
+xBottom <- ggarrange(ggMonoComboTherapyCountsNoChemo, ggComboDrugHeatmap, nrow=1, widths=c(1.5,1),
+                  labels=LETTERS[4:5], legend=NULL, align="none")
+ggMTBv1 <- ggarrange(xTop, xBottom, ncol=1, heights=c(1,2), common.legend = TRUE, legend=NULL)
+ggMTBv1
+ggsave("FigMTB-v1.2.pdf", width=300, height=250, units="mm")
+ggsave("FigMTB-v1.2.png", width=300, height=250, units="mm")
+
+```
+
+# Cross-check numbers
+* 201 patients? YES
+```{r}
+master.all <- openxlsx::read.xlsx(f, sheet=1)
+master.all <- master.all[!is.na(master.all$PRISM.ID),]
+length(unique(master.all$PRISM.ID))
+```
+
+* 134 with at least one MTB recommendation? YES
+```{r}
+length(unique(master.all$PRISM.ID[master.all$`MTB.recommendation:.Y/N` == "Y"]))
+```
+
+* 237 distinct MTB therapeutic recommendations made to these 133 patients.
+```{r}
+length(master.all$PRISM.ID[master.all$`MTB.recommendation:.Y/N` == "Y" & is.na(master.all$Recommendation.same)])
+```
+* Median 1 rec (range 1 – 5) YES
+```{r}
+numRecPerPatient <- table(master.all$PRISM.ID[master.all$`MTB.recommendation:.Y/N` == "Y" & is.na(master.all$Recommendation.same)])
+numRecPerPatient
+range(numRecPerPatient) # 1-5
+median(numRecPerPatient) # 1
+sum(numRecPerPatient %in% c(1,2)) # 106
+```
+
+* One hundred and twelve (48%) of these were Tier 1 or 2 recommendations, 122 (51%) were Tier 3 or 4, and 3 (1%) were Tier 5 recommendations (figure C)
+```{r}
+x <- table(master.all$Tier.of.recommendation[master.all$`MTB.recommendation:.Y/N` == "Y" & is.na(master.all$Recommendation.same)])
+sum(master.all$Tier.of.recommendation[master.all$`MTB.recommendation:.Y/N` == "Y" & is.na(master.all$Recommendation.same)] %in% c("1M", "2M"))
+sum(master.all$Tier.of.recommendation[master.all$`MTB.recommendation:.Y/N` == "Y" & is.na(master.all$Recommendation.same)] %in% c("3M", "4M"))
+sum(master.all$Tier.of.recommendation[master.all$`MTB.recommendation:.Y/N` == "Y" & is.na(master.all$Recommendation.same)] %in% c("5M"))
+```
+
+* Types of recommendations: 169 single agent, 41 targeted+chemo, 33 targeted+targeted YES
+* LL: "One hundred and sixty two (70%) were single agent recommendations (figure E). Combination treatments represented 31% (n=73) of the therapeutic recommendations."
+```{r}
+recTypeSum %>% mutate(pct=n/sum(recTypeSum$n)*100)
+sum(recTypeSum$n[2:3])/sum(recTypeSum$n)*100
+```
+
+* summarise the drugs by pathways
+```{r}
+View(MonoComboTherapyCounts)
+MonoComboTherapyCounts %>% select(DrugClass, DrugClassN) %>% distinct() %>% mutate(percent=DrugClassN/sum(DrugClassN)*100)
+```
+
+* The most recommended drug combination was mTOR inhibitor plus chemotherapy (26%; 19/73), followed by PARP inhibitor plus chemotherapy (16%; 12/73) and mTOR inhibitor plus CDK4/6 inhibitor (16%; 12/73) (figure F). 
+```{r}
+#View(master.combo)
+sort(table(master.combo$`Comb.Rx.for.paper.(Mark)`), decreasing=T)
+round(sort(table(master.combo$`Comb.Rx.for.paper.(Mark)`), decreasing=T)/nrow(master.combo)*100)
+
+```
+
+* Treatments targeting the PI3K/AKT/mTOR pathway (24.8%) were most frequently recommended, followed by treatments targeting MAPK (16.9%), cyclin/CDK (13.6%), DNA damage repair (9.5%) and the SWI/SNF/PRC2 chromatin remodelling complex (8.7%) (figure D).
+* MC: is this based on monotherapies or all? <NOT ALL>... This isn't in the paper anymore...
+```{r}
+recs.all <- master.all[master.all$`MTB.recommendation:.Y/N` == "Y" & is.na(master.all$Recommendation.same), ]
+#View(recs.all)
+sort(table(recs.all$Pathway), decreasing=TRUE)
+round(sort(table(recs.all$Pathway), decreasing=TRUE)/nrow(recs.all)*100)
+```
+
+```{r}
+sort(table(master.mono$Pathway), decreasing=TRUE)
+round(sort(table(master.mono$Pathway), decreasing=TRUE)/nrow(recs.all)*100)
+
+```
+
+* Genes/Pathways involved in recommendation
+```{r}
+a <- as.matrix(sort(table(master.mono$DrugClass)))
+a <- as_tibble(a, rownames="Pathway", .name_repair="minimal"); names(a)[2] <- "mono"
+a
+b <- as.matrix(sort(table(c(master.combo$ComboPathway1, master.combo$ComboPathway2))))
+b <- as_tibble(b, rownames="Pathway", .name_repair="minimal"); names(b)[2] <- "combo"
+merge(a, b)
+```
